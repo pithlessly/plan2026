@@ -483,7 +483,6 @@
                     @{ :used-explicitly false
                        :true-label      lbl
                        :mark-as-used-explicitly (fn [self] (put self :used-explicitly true))
-                       :mark-as-used-implicitly (fn [self])
                        :syntax-of               (fn [self] ~(block-break ,lbl)) }
                   cf1-simplified (recurse cf1 lbl (merge ctx {lbl fresh-ctx-entry})) ]
               (if (fresh-ctx-entry :used-explicitly)
@@ -496,22 +495,18 @@
             ;(recurse cf1 lbl
                (merge ctx
                  { innermost-label
-                    (if innermost-label
+                    (when innermost-label
                        @{ :true-label  ((ctx innermost-label) :true-label)
-                          :mark-parent (fn [self] (:mark-as-used-implicitly (ctx innermost-label)))
-                          :mark-as-used-explicitly (fn [self] (:mark-parent self))
-                          :mark-as-used-implicitly (fn [self] (:mark-parent self))
+                          :mark-as-used-explicitly (fn [self])
                           :syntax-of               (fn [self] ~(loop-break ,lbl)) })
                    lbl
                      @{ :true-label lbl
                         :mark-as-used-explicitly (fn [self])
-                        :mark-as-used-implicitly (fn [self])
                         :syntax-of               (fn [self] ~(loop-continue ,lbl)) }}))]])
       [['jmp i]]
         (let [ctx-entry (ctx i)
               implicit  (= (ctx-entry :true-label) innermost-label) ]
-          (if implicit (do (:mark-as-used-implicitly ctx-entry)
-                           [] )
+          (if implicit []
                        (do (:mark-as-used-explicitly ctx-entry)
                            [(:syntax-of ctx-entry)] )))
       [['tcall args f]]
