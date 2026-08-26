@@ -337,7 +337,9 @@
         value-in-pred) ))
   (eachp [bb-id bb] cfg
     (eachp [r v] (or (requisite-insns bb-id) {})
-      (:emit-insn bb [nil 'ups [v] r]) )))
+      (update bb :upsilon-insns
+        (fn [old]
+          (array/push (or old @[]) [nil 'ups [v] r]) )))))
 
 (defn occurrence-analysis [cfg reverse-postorder ssa]
   (def {:resolve-name resolve-name} ssa)
@@ -459,6 +461,7 @@
     (def bb-body [
       ;(seq [[r phi] :pairs (bb :phi-regs)] [phi 'phi [] r])
       ;bb-body
+      ;(or (bb :upsilon-insns) [])
     ])
     (unless (empty? bb-body)
       (set code [['do ;bb-body] ;code]) )
