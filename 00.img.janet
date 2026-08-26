@@ -522,6 +522,92 @@
         (errorf "unknown control flow: %Q" cf) ))
   (recurse control-flow nil {}) )
 
+(defn to-javascript [occurrences control-flow]
+  (defn js-label [lbl]
+    (assert (int? lbl))
+    (string/format "b%d" lbl) )
+  (defn reg-to-js-var [r]
+    (assert (register? r))
+    (pat/match r
+      :args-stack "args"
+      |int?       (string/format "r%d" r) ))
+  (defn ssa-node-to-js-var [v]
+    (assert (symbol? v))
+    (string v) )
+  (defn val-to-js-var [v]
+    (assert (ssa-value? v))
+    (pat/match v
+      (or |int? |boolean?) (string v)
+      |symbol?             (ssa-node-to-js-var v)
+      :empty               "[]"
+      |keyword?            (string/format "a%s" v) )) # parameters
+  (def declared-local-vars
+    [;(map reg-to-js-var (sort (keys (occurrences :all-phi-regs))))
+     ;(map ssa-node-to-js-var (keys (occurrences :occurrences))) ])
+  (defn translate-insn [insn]
+    (pat/match insn
+      [nil 'ups [v] r]
+        [(reg-to-js-var r) " = " (val-to-js-var v) ";"]
+      [o 'phi [] r]
+        [(ssa-node-to-js-var o) " = " (reg-to-js-var r) ";"]
+      [o 'mktab [] nil]
+        [(ssa-node-to-js-var o) " = new Map();"]
+      [o 'len [v] nil]
+        [(ssa-node-to-js-var o) " = length(" (val-to-js-var v) ");"]
+      [o 'lt [v1 v2] nil]
+        [(ssa-node-to-js-var o) " = lt(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
+      [o 'sub [v1 v2] nil]
+        [(ssa-node-to-js-var o) " = sub(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
+      [o 'get [v1 v2] nil]
+        [(ssa-node-to-js-var o) " = get(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
+      [o 'neq [v1 v2] nil]
+        [(ssa-node-to-js-var o) " = neq(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
+      [o 'mkstu [args] nil]
+        [(ssa-node-to-js-var o) " = mkstu(..." (val-to-js-var args) ");"]
+      [o 'push [args v] nil]
+        [(ssa-node-to-js-var o) " = [..." (val-to-js-var args) ", " (val-to-js-var v) "];"]
+      [o 'call [args f] nil]
+        [(ssa-node-to-js-var o) " = " (val-to-js-var f) "(..." (val-to-js-var args) ");"]
+      [nil 'put [v1 v2 v3] nil]
+        ["put(" (val-to-js-var v1) ", " (val-to-js-var v2) ", " (val-to-js-var v3) ");"]
+      [o 'addim [v] x]
+        [(ssa-node-to-js-var o) " = add(" (val-to-js-var v) ", " (string x) ");"]
+      [o 'ldc [] i]
+        [(ssa-node-to-js-var o) " = ldc(" (string i) ");"]
+      # else
+        # (string/format "/* unhandled insn: %q */" insn)
+        (errorf "unhandled insn: %Q" insn)
+      ))
+  (defn translate-control-flow [cf]
+    (pat/match cf
+      ['loop lbl & body]
+        [(js-label lbl) ": for (;;) { " (map translate-control-flow body) " }"]
+      ['block lbl & body]
+        [(js-label lbl) ": do { " (map translate-control-flow body) " } while (false);"]
+      ['if v cf1 cf2]
+        ["if (truthy(" (val-to-js-var v) ")) { "
+         (map translate-control-flow cf1)
+         " }"
+         (if (empty? cf2)
+           []
+           [" else { "
+            (map translate-control-flow cf2)
+            " }" ])]
+      (or ['loop-break lbl] ['block-break lbl])
+        ["break " (js-label lbl) ";"]
+      ['loop-continue lbl]
+        ["continue " (js-label lbl) ";"]
+      ['do & insns]
+        (map translate-insn insns)
+      ['tcall args f]
+        ["return " (val-to-js-var f) "(..." (val-to-js-var args) ");"] ))
+  (string/join
+    (flatten
+      [(if (empty? declared-local-vars)
+         []
+         ["let " (interpose "," declared-local-vars) ";"])
+       (map translate-control-flow control-flow) ])))
+
 (defn recompile [assembly]
 
   (def { :bytecode bytecode } assembly)
@@ -540,14 +626,14 @@
   (each bb cfg (:freeze! bb))
   (def occurrences (occurrence-analysis cfg reverse-postorder ssa))
   (def do-tree (dominator-tree cfg reverse-postorder))
-  (def control-flow
-    (simplify-structured-control-flow
-      (to-structured-control-flow cfg reverse-postorder do-tree) ))
+  (def control-flow (to-structured-control-flow cfg reverse-postorder do-tree))
+  (def control-flow (simplify-structured-control-flow control-flow))
+  (def js (to-javascript occurrences control-flow))
 
-  (pp occurrences)
-  (pp control-flow)
-
-  { :bytecode bytecode :cfg cfg :occurrences occurrences })
+  { :cfg cfg
+    :occurrences occurrences
+    :control-flow control-flow
+    :js js })
 
 (defn sum3
   "Solve the 3SUM problem in O(n^2) time."
@@ -564,9 +650,11 @@
         (put solutions {i true j true k true} true))))
   (map keys (keys solutions)))
 
-(def {:cfg cfg :occurrences occurrences}
+(def res
   (with-dyns [*out* stderr *pretty-format* "%P"]
     (recompile (disasm sum3)) ))
 
-(printf "%m" occurrences)
-(dump-cfg cfg)
+(printf "%m" (res :occurrences))
+(dump-cfg (res :cfg))
+(printf "%m" (res :control-flow))
+(printf "%m" (res :js))
