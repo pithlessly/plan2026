@@ -319,6 +319,26 @@
         [(resolve-name output) opcode [;(map resolve-name inputs)] immediates] ))
     (update-each (bb :defined-regs) resolve-name) ))
 
+(defn to-phi-upsilon-form [cfg]
+  (each bb cfg
+    (when (= 1 (length (bb :preds)))
+      (assert (empty? (bb :phi-regs))) ))
+  (def requisite-insns @{}) # bb-id ↦ (reg ↦ value-name)
+  (loop [bb      :in cfg
+         [r phi] :pairs (bb :phi-regs)
+         pred    :in (bb :preds)]
+    (def [value-in-pred new?] (:lookup-reg+ (cfg pred) r))
+    # FIXME: if this value came from a phi node in pred, it's probably redundant
+    # to assign it again. So we should probably just be consulting ((cfg pred) :defined-regs).
+    (assert new?)
+    (update-in requisite-insns [pred r]
+      (fn [old-value]
+        (when old-value (assert (= old-value value-in-pred)))
+        value-in-pred) ))
+  (eachp [bb-id bb] cfg
+    (eachp [r v] (or (requisite-insns bb-id) {})
+      (:emit-insn bb [nil 'ups [v] r]) )))
+
 (defn occurrence-analysis [cfg reverse-postorder ssa]
   (def {:resolve-name resolve-name} ssa)
   # name ↦ @[bb-id definition occurrences]
@@ -344,15 +364,6 @@
       (when output
         (assert (not (has-key? occurrences output)))
         (put occurrences output @[bb-id insn 0]) )))
-  # populate with the referents of phi nodes
-  (each bb cfg
-    (eachp [r phi] (bb :phi-regs)
-      (assert (= phi (resolve-name phi)))
-      (each pred (bb :preds)
-        (def phi-target (resolve-name (:lookup-reg (cfg pred) r)))
-        (when (symbol? phi-target)
-          (assert (has-key? occurrences phi-target))
-          (update (occurrences phi-target) 2 inc) ))))
   {:occurrences occurrences
    :all-phi-regs all-phi-regs})
 
@@ -445,6 +456,10 @@
               (def bb-next (first succs))
               (assert (not (inline? (cfg bb-next))))
               [(inline-or-jmp bb-next) insns] )))
+    (def bb-body [
+      ;(seq [[r phi] :pairs (bb :phi-regs)] [phi 'phi [] r])
+      ;bb-body
+    ])
     (unless (empty? bb-body)
       (set code [['do ;bb-body] ;code]) )
     (def blocks-to-break-to (filter |(not (inline? (cfg $))) ((do-tree :children) bb-id)))
@@ -523,6 +538,7 @@
   (def reverse-postorder (compute-reverse-postorder-traversal cfg))
   (simplify-ssa parameter-slots cfg ssa reverse-postorder)
   (resolve-all-names cfg ssa) # not strictly necessary, but useful for pretty printing
+  (to-phi-upsilon-form cfg)
   (each bb cfg (:freeze! bb))
   (def occurrences (occurrence-analysis cfg reverse-postorder ssa))
   (def do-tree (dominator-tree cfg reverse-postorder))
