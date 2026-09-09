@@ -36,6 +36,12 @@
   (eachk k ds (update ds k f))
   ds)
 
+(defn fold-right [f init xs]
+  (var acc init)
+  (each x (reverse xs)
+    (set acc (f x acc)) )
+  acc)
+
 (def Queue @{
   :enqueue (fn [self x] (array/push (self :alt) x))
   :dequeue (fn [self]
@@ -521,6 +527,75 @@
       # else
         (errorf "unknown control flow: %Q" cf) ))
   (recurse control-flow nil {}) )
+
+# The scheduling algorithm determines whether an SSA variable can be inlined at
+# its use sites, or whether it must be lowered to an assignment.
+# A *schedule* is a data structure summarizing the effects associated with a
+# piece of JS code. Schedules are built in reverse (from the end to the
+# beginning of the control flow tree), can can be constructed before, but in
+# anticipation of, the actual emitted JS code.
+# Along with occurrence analysis, the schedule can be used to implement a
+# conservative approximation of inline safety. The definition of a schedule is
+# subject to change, but for now it looks like:
+
+# <schedule> ::= nil | [<schedule-entry> <schedule>]
+# <schedule-entry> ::= ['use <ssa-node>]
+#                    | ['phi <register>]
+#                    | ['ups <register>]
+#                    | ['opaque <set of registers>]
+#                    | ['side-effect]
+
+(defn schedule/used-regs [schedule]
+  (def result @{})
+  (var sch schedule)
+  (while (not (nil? sch))
+    (def [entry kont] sch)
+    (set sch kont)
+    (pat/match entry
+      [(or 'phi 'ups) r]  (put result r true)
+      ['opaque rs]        (merge-into result rs)
+      (or ['use _]
+          ['side-effect]) nil) )
+  result)
+
+(defn schedule/concat [sch1 sch2]
+  (pat/match sch1
+    nil sch2
+    [entry1 sch1-rest] [entry1 (schedule/concat sch1-rest sch2)] ))
+
+(defn schedule/value [v]
+  (assert (ssa-value? v))
+  (pat/match v
+    |symbol?                       [['use v] nil]
+    (or |int? |keyword? |boolean?) nil))
+
+(defn schedule/count-uses [sch v]
+  (assert (symbol? v))
+  (pat/match sch
+    nil 0
+    [stmt cont]
+      (+ (schedule/count-uses cont v)
+         (pat/match stmt
+           ['use (= v)] 1
+           _            0))))
+
+(defn schedule/uses-value-inlineably? [sch is-reordering-barrier? v]
+  (assert (symbol? v))
+  (pat/match sch
+    nil
+      true
+    [|is-reordering-barrier? cont]
+      (= 0 (schedule/count-uses sch v))
+    [_ cont]
+      (schedule/uses-value-inlineably? cont is-reordering-barrier? v) ))
+
+(defn schedule/substitute-uses [sch v new-sch]
+  (pat/match sch
+    nil nil
+    [stmt (map |(schedule/substitute-uses $ v new-sch) tail)]
+      (pat/match stmt
+        ['use (= v)] (schedule/concat new-sch tail)
+        _            [stmt tail] )))
 
 (defn to-javascript [occurrences control-flow]
   (defn js-label [lbl]
