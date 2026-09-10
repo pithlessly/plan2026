@@ -597,91 +597,212 @@
         ['use (= v)] (schedule/concat new-sch tail)
         _            [stmt tail] )))
 
-(defn to-javascript [occurrences control-flow]
-  (defn js-label [lbl]
+(defn to-javascript [occurrences top-level-cf]
+  (defn tx-label [lbl]
     (assert (int? lbl))
     (string/format "b%d" lbl) )
-  (defn reg-to-js-var [r]
+  (defn tx-register [r]
     (assert (register? r))
     (pat/match r
       :args-stack "args"
       |int?       (string/format "r%d" r) ))
-  (defn ssa-node-to-js-var [v]
+  (def inline-node? @{})    # ssa-node ↦ bool       (populated in 1st phase)
+  (def node-definition @{}) # ssa-node ↦ definition (populated in 2nd phase)
+  (defn tx-ssa-node [v]
     (assert (symbol? v))
-    (string v) )
-  (defn val-to-js-var [v]
+    (pat/match (inline-node? v)
+      true  (assert (node-definition v))
+      false (string v) ))
+  (defn tx-ssa-val [v]
     (assert (ssa-value? v))
     (pat/match v
       (or |int? |boolean?) (string v)
-      |symbol?             (ssa-node-to-js-var v)
+      |symbol?             (tx-ssa-node v)
       :empty               "[]"
       |keyword?            (string/format "a%s" v) )) # parameters
-  (def declared-local-vars
-    [;(map reg-to-js-var (sort (keys (occurrences :all-phi-regs))))
-     ;(map ssa-node-to-js-var (keys (occurrences :occurrences))) ])
-  (defn translate-insn [insn]
+
+  # `tx-insn` and `tx-control-flow` return a schedule and a nullary function `f`.
+  # `f` can only be called after `inlining-decisions` is completely populated,
+  # and returns the compiled JS.
+
+  (defn tx-insn [insn [rest-sch rest-code]]
+    (def [output-name] insn)
+
+    (defn produce-assignment-to-ssa-name
+      [max-occurrences is-reordering-barrier? defining-sch defining-expr]
+      (assert (symbol? output-name))
+      (def occurrences (((occurrences :occurrences) output-name) 2))
+      (def do-inline?
+        (and # there must not be too many occurrences
+             (if max-occurrences (<= occurrences max-occurrences) true)
+             # we must be able to find all the occurrences in the tail schedule
+             (= occurrences (schedule/count-uses rest-sch output-name))
+             # and these occurrences must not occur after a barrier in the schedule
+             (schedule/uses-value-inlineably? rest-sch is-reordering-barrier? output-name) ))
+      (put inline-node? output-name do-inline?)
+      (if do-inline?
+        [(schedule/substitute-uses rest-sch output-name defining-sch)
+         (fn []
+           # we marked that this node will be inlined, so we don't
+           # have to emit any extra code for its definition up front
+           (put node-definition output-name (defining-expr))
+           (rest-code) )]
+        # if we don't inline it, then we do compute its definition
+        # up front, and the schedule needs to reflect this
+        [(schedule/concat defining-sch rest-sch)
+         |[(tx-ssa-node output-name) " = " (defining-expr) ";" (rest-code)] ]))
+
+    (defn barrier/assigns-reg? [r]
+      |(pat/match $ ['ups (= r)] true
+                    ['opaque s]  (s r)
+                    _            false))
+    (defn barrier/side-effect? [entry]
+      (pat/match entry ['side-effect] true
+                       ['opaque _]    true
+                       _              false))
+    (defn barrier/none [_] false)
+
     (pat/match insn
-      [nil 'ups [v] r]
-        [(reg-to-js-var r) " = " (val-to-js-var v) ";"]
-      [o 'phi [] r]
-        [(ssa-node-to-js-var o) " = " (reg-to-js-var r) ";"]
-      [o 'mktab [] nil]
-        [(ssa-node-to-js-var o) " = new Map();"]
-      [o 'len [v] nil]
-        [(ssa-node-to-js-var o) " = length(" (val-to-js-var v) ");"]
-      [o 'lt [v1 v2] nil]
-        [(ssa-node-to-js-var o) " = lt(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
-      [o 'sub [v1 v2] nil]
-        [(ssa-node-to-js-var o) " = sub(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
-      [o 'get [v1 v2] nil]
-        [(ssa-node-to-js-var o) " = get(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
-      [o 'neq [v1 v2] nil]
-        [(ssa-node-to-js-var o) " = neq(" (val-to-js-var v1) ", " (val-to-js-var v2) ");"]
-      [o 'mkstu [args] nil]
-        [(ssa-node-to-js-var o) " = mkstu(..." (val-to-js-var args) ");"]
-      [o 'push [args v] nil]
-        [(ssa-node-to-js-var o) " = [..." (val-to-js-var args) ", " (val-to-js-var v) "];"]
-      [o 'call [args f] nil]
-        [(ssa-node-to-js-var o) " = " (val-to-js-var f) "(..." (val-to-js-var args) ");"]
+      [_ 'ups [v] r]
+        [(schedule/concat (schedule/value v)
+           [['ups r] rest-sch] )
+         |[(tx-register r) " = " (tx-ssa-val v) ";" (rest-code)] ]
+      [_ 'phi [] r]
+        (produce-assignment-to-ssa-name
+          nil # phis can be inlined even if used more than once
+          (barrier/assigns-reg? r)
+          [['phi r] nil]
+          |[(tx-register r)] )
+      [_ 'mktab [] r]
+        (produce-assignment-to-ssa-name
+          1            # inlining a table used more than once would break physical identity
+          barrier/none # no other operation is a barrier
+          nil          # doesn't introduce any operation into the schedule
+          |["new Map()"] )
+      [_ 'len [v] nil]
+        # len() has a side effect, because it can error
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value v) [['side-effect] nil])
+          |["length(" (tx-ssa-val v) ")"] )
+      [_ 'lt [v1 v2] nil]
+        (produce-assignment-to-ssa-name
+          1            # avoid code duplication
+          barrier/none # no other operation is a barrier
+          (schedule/concat (schedule/value v1) (schedule/value v2))
+          |["lt(" (tx-ssa-val v1) ", " (tx-ssa-val v2) ")"] )
+      [_ 'sub [v1 v2] nil]
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value v1)
+            (schedule/concat (schedule/value v2)
+              [['side-effect] nil]))
+          |["sub(" (tx-ssa-val v1) ", " (tx-ssa-val v2) ")"] )
+      [_ 'get [v1 v2] nil]
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value v1)
+            (schedule/concat (schedule/value v2)
+              [['side-effect] nil]))
+          |["get(" (tx-ssa-val v1) ", " (tx-ssa-val v2) ")"] )
+      [_ 'neq [v1 v2] nil]
+        (produce-assignment-to-ssa-name
+          1            # avoid code duplication
+          barrier/none # no other operation is a barrier
+          (schedule/concat (schedule/value v1) (schedule/value v2))
+          |["neq(" (tx-ssa-val v1) ", " (tx-ssa-val v2) ")"] )
+      [_ 'mkstu [args] nil]
+        # mkstu() has a side effect, because it can error
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value args) [['side-effect] nil])
+          |["mkstu(" (tx-ssa-val args) ")"] )
+      [_ 'push [args v] nil]
+        (produce-assignment-to-ssa-name
+          1            # shouldn't be possible for a push() to have multiple occurrences anyway
+          barrier/none # no other operation is a barrier
+          (schedule/concat (schedule/value args) (schedule/value v))
+          |["[..." (tx-ssa-val args) ", " (tx-ssa-val v) "]"] )
+      [_ 'call [args f] nil]
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value f)
+            (schedule/concat (schedule/value args)
+              [['side-effect] nil]))
+          |[(tx-ssa-val f) "(..." (tx-ssa-val args) ")"] )
       [nil 'put [v1 v2 v3] nil]
-        ["put(" (val-to-js-var v1) ", " (val-to-js-var v2) ", " (val-to-js-var v3) ");"]
-      [o 'addim [v] x]
-        [(ssa-node-to-js-var o) " = add(" (val-to-js-var v) ", " (string x) ");"]
-      [o 'ldc [] i]
-        [(ssa-node-to-js-var o) " = ldc(" (string i) ");"]
+        [(schedule/concat (schedule/value v1)
+           (schedule/concat (schedule/value v2)
+             (schedule/concat (schedule/value v3)
+               [['side-effect] rest-sch] )))
+         |["put(" (tx-ssa-val v1) ", " (tx-ssa-val v2) ", " (tx-ssa-val v3) ");" (rest-code)] ]
+      [_ 'addim [v] x]
+        # add() has a side effect, because it can error
+        # so it should not be reordered with other side effects
+        (produce-assignment-to-ssa-name
+          1 barrier/side-effect?
+          (schedule/concat (schedule/value v) [['side-effect] nil])
+          |["add(" (tx-ssa-val v) ", " (string x) ")"] )
+      [_ 'ldc [] i]
+        (produce-assignment-to-ssa-name
+          1 barrier/none nil |["ldc(" (string i) ")"] )
       # else
         # (string/format "/* unhandled insn: %q */" insn)
-        (errorf "unhandled insn: %Q" insn)
-      ))
-  (defn translate-control-flow [cf]
+        (errorf "unhandled insn: %Q" insn) ))
+
+  (defn tx-control-flow [cf]
     (pat/match cf
-      ['loop lbl & body]
-        [(js-label lbl) ": for (;;) { " (map translate-control-flow body) " }"]
-      ['block lbl & body]
-        [(js-label lbl) ": do { " (map translate-control-flow body) " } while (false);"]
-      ['if v cf1 cf2]
-        ["if (truthy(" (val-to-js-var v) ")) { "
-         (map translate-control-flow cf1)
-         " }"
-         (if (empty? cf2)
-           []
-           [" else { "
-            (map translate-control-flow cf2)
-            " }" ])]
-      (or ['loop-break lbl] ['block-break lbl])
-        ["break " (js-label lbl) ";"]
-      ['loop-continue lbl]
-        ["continue " (js-label lbl) ";"]
-      ['do & insns]
-        (map translate-insn insns)
-      ['tcall args f]
-        ["return " (val-to-js-var f) "(..." (val-to-js-var args) ");"] ))
+      []
+        [nil |[]]
+      [[(or 'loop-break 'block-break) lbl]]
+        [nil |["break " (tx-label lbl) ";"]]
+      [['loop-continue lbl]]
+        [nil |["continue " (tx-label lbl) ";"]]
+      [['tcall args f]]
+        [(schedule/concat (schedule/value f)
+                           (schedule/value args) )
+         |["return " (tx-ssa-val f) "(..." (tx-ssa-val args) ");"] ]
+      [stmt & rest]
+        (let [[rest-sch rest-code] (tx-control-flow rest)]
+          (pat/match stmt
+            ['if v cf1 cf2]
+              (let [[cf1-sch cf1-code] (tx-control-flow cf1)
+                    [cf2-sch cf2-code] (tx-control-flow cf2)]
+                [(schedule/concat (schedule/value v)
+                   [['opaque (merge (schedule/used-regs cf1-sch)
+                                    (schedule/used-regs cf2-sch) )]
+                    rest-sch])
+                 |["if (truthy(" (tx-ssa-val v) ")) { "
+                   (cf1-code)
+                   " }"
+                   (if (empty? cf2)
+                     []
+                     [" else { "
+                      (cf2-code)
+                      " }" ])
+                   (rest-code) ]])
+            ['loop lbl & body]
+              (let [[body-sch body-code] (tx-control-flow body)]
+                [[['opaque (schedule/used-regs body-sch)] rest-sch]
+                 |[(tx-label lbl) ": for (;;) { " (body-code) " }" (rest-code)] ])
+            ['block lbl & body]
+              (let [[body-sch body-code] (tx-control-flow body)]
+                [[['opaque (schedule/used-regs body-sch)] rest-sch]
+                 |[(tx-label lbl) ": do { " (body-code) " } while (false);" (rest-code)] ])
+            ['do & insns]
+              (fold-right tx-insn [rest-sch rest-code] insns) ))))
+
+  (def [top-level-sch top-level-js] (tx-control-flow top-level-cf))
+  (def declared-local-vars
+    [;(map tx-register (sort (keys (occurrences :all-phi-regs))))
+     ;(seq [[node do-inline?] :pairs inline-node?
+            :unless do-inline?] node)])
   (string/join
     (flatten
       [(if (empty? declared-local-vars)
          []
-         ["let " (interpose "," declared-local-vars) ";"])
-       (map translate-control-flow control-flow) ])))
+         ["let " (interpose "," declared-local-vars) ";\n"])
+       (top-level-js) ])))
 
 (defn recompile [assembly]
 
