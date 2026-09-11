@@ -177,9 +177,9 @@
     (set ((self :phi-regs) r) (gensym)) )
   :lookup-reg+ (fn [self r]
     (assert (register? r) r)
-    (if-let [v ((self :defined-regs) r)] [v true]
-      (if-let [v ((self :phi-regs) r)] [v true]
-        (let [v (:fresh-phi self r)] [v false]) )))
+    (if-let [v ((self :defined-regs) r)] [v false]
+      (if-let [v ((self :phi-regs) r)] [v false]
+        (let [v (:fresh-phi self r)] [v true]) )))
   :lookup-reg (fn [self r] (first (:lookup-reg+ self r)))
   :update-reg (fn [self r v]
     (:assert-mutable self)
@@ -273,49 +273,69 @@
 # Simple phi node minimization
 # (roughly following Braun, Buchwald, Hack, Leißa, Mallon, and Zwinkau 2013)
 (defn simplify-ssa [parameter-slots cfg ssa reverse-postorder]
+  # maps phi names to their known sources.
+  # a source is an SSA value that is definitely not elidable,
+  # either because it isn't an SSA node, or because it has
+  # multiple sources that are definitely distinct.
+  # initially it maps all phi nodes to `false`, meaning no
+  # source is known.
+  (def phi-sources
+    (tabseq [bb :in cfg phi :in (bb :phi-regs)] phi :undef))
 
-  (def elided-phi-nodes @{})
-  (defn resolve-name [name]
-    (if-let [new-name (elided-phi-nodes name)]
-      (let [resolved (resolve-name new-name)]
-        (assert (symbol? name) name)
-        (unless (= new-name resolved)
-          (put elided-phi-nodes new-name resolved) )
-        resolved)
-      name))
-
-  (put ssa :resolve-name resolve-name)
-
-  (def worklist (new-worklist))
-  (each bb-id reverse-postorder (:add worklist bb-id))
-
+  (var did-improve true)
   (defn resolve-register [bb-id r]
     (assert (>= r parameter-slots) r)
     (def [v new?] (:lookup-reg+ (cfg bb-id) r))
-    (when new? (:add worklist bb-id) )
-    (resolve-name v) )
+    (when new?
+      # (printf "resolve-register created φ(%Q) in BB %Q" r bb-id)
+      (set did-improve true)
+      (assert (symbol? v))
+      (assert (not (has-key? phi-sources v)))
+      (put phi-sources v :undef) )
+    v)
 
-  (loop [bb-id :iterate (:next worklist) :let [bb (cfg bb-id)]]
-    # (printf "improving basic block: %P %P" bb-id (:as-list (worklist :queue)))
-    (var did-improve false)
-    (each [r phi] (pairs (bb :phi-regs))
-      (assert (not (has-key? elided-phi-nodes phi)))
+  (while did-improve
+    (set did-improve false)
+    (loop [bb-id :in reverse-postorder
+           :let [bb (cfg bb-id)]
+           [r phi] :in (pairs (bb :phi-regs))
+           :let [old-source (phi-sources phi)]
+           :when [(not= old-source phi)] ]
       (def phi-args (map |(resolve-register $ r) (bb :preds)))
-      (def unique-phi-args @{})
-      (each arg phi-args (put unique-phi-args arg true))
-      (put unique-phi-args phi nil)
-      (when-let [elision-target (case (length unique-phi-args)
-                                  0 :undef
-                                  1 (first (keys unique-phi-args)) )]
-        (put elided-phi-nodes phi elision-target)
-        (:update-reg-if-absent bb r elision-target)
+      (def unique-phi-sources @{})
+      (each arg phi-args
+        (put unique-phi-sources (or (phi-sources arg) arg) true) )
+      (put unique-phi-sources :undef nil)
+      (def new-source (case (length unique-phi-sources)
+                        0 :undef
+                        1 (first (keys unique-phi-sources))
+                          phi))
+      (assert new-source)
+      (when (not= old-source new-source)
+        (printf "improving %Q(r=%Q): %Q → %Q → %Q" phi r old-source unique-phi-sources new-source)
+        (put phi-sources phi new-source)
+        (set did-improve true) )))
+
+  # (printf "%M" phi-sources)
+  (def elided-phi-nodes
+    (tabseq [[phi source] :pairs phi-sources]
+      phi
+      (pat/match source
+        :undef  nil
+        (= phi) nil
+        _       source)))
+  # (printf "%M" elided-phi-nodes)
+  (each bb cfg
+    (each [r phi] (pairs (bb :phi-regs))
+      (when-let [elision-target (elided-phi-nodes phi)]
+        # (printf "eliding phi node: %Q" phi)
         (put (bb :phi-regs) r nil)
-        # (printf "bb %p: improved r=%p %p → %p" bb-id r phi elision-target)
-        (set did-improve true) ))
-    (when did-improve
-      # (print "* found improvements for this bb")
-      (each succ (bb :succs)
-        (:add worklist succ) ))))
+        (:update-reg-if-absent bb r elision-target) )))
+
+  (defn resolve-name [name]
+    (or (elided-phi-nodes name) name) )
+  (put ssa :resolve-name resolve-name)
+  nil)
 
 (defn resolve-all-names [cfg ssa]
   (def {:resolve-name resolve-name} ssa)
@@ -336,7 +356,7 @@
     (def [value-in-pred new?] (:lookup-reg+ (cfg pred) r))
     # FIXME: if this value came from a phi node in pred, it's probably redundant
     # to assign it again. So we should probably just be consulting ((cfg pred) :defined-regs).
-    (assert new?)
+    (assert (not new?))
     (update-in requisite-insns [pred r]
       (fn [old-value]
         (when old-value (assert (= old-value value-in-pred)))
