@@ -380,7 +380,7 @@
       (assert (not (has-key? occurrences phi)))
       (put all-phi-regs r true)
       (put occurrences phi @[bb-id ~(phi ,r) 0]) )
-    (each insn (bb :insns)
+    (each insn [;(bb :insns) ;(or (bb :upsilon-insns) [])]
       (def [output _ inputs _] insn)
       (each input inputs
         (when (symbol? input)
@@ -658,7 +658,6 @@
     (def v (resolve-name vv))
     (def inline? (and (symbol? v) (inline-node? v)))
     (def definition (if inline? (get-in occurrences [:occurrences v 1])))
-    (pp [v definition])
     (pat/match [v definition]
       [:empty _]
         ""
@@ -845,12 +844,14 @@
     [;(map tx-register (sort (keys (occurrences :all-phi-regs))))
      ;(seq [[node do-inline?] :pairs inline-node?
             :unless do-inline?] node)])
+  (def js (top-level-js))
+  (put ssa :inlining-decisions inline-node?)
   (string/join
     (flatten
       [(if (empty? declared-local-vars)
          []
          ["let " (interpose "," declared-local-vars) ";\n"])
-       (top-level-js) ])))
+       js])))
 
 (defn recompile [assembly]
 
@@ -877,7 +878,9 @@
   { :cfg cfg
     :occurrences occurrences
     :control-flow control-flow
-    :js js })
+    :inlining-decisions (ssa :inlining-decisions)
+    :js js
+  })
 
 (defn sum3
   "Solve the 3SUM problem in O(n^2) time."
@@ -901,4 +904,5 @@
 (printf "%m" (res :occurrences))
 (dump-cfg (res :cfg))
 (printf "%m" (res :control-flow))
+(printf "%m" (res :inlining-decisions))
 (printf "%m" (res :js))
