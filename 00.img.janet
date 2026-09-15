@@ -312,7 +312,7 @@
                           phi))
       (assert new-source)
       (when (not= old-source new-source)
-        (printf "improving %Q(r=%Q): %Q → %Q → %Q" phi r old-source unique-phi-sources new-source)
+        # (printf "improving %Q(r=%Q): %Q → %Q → %Q" phi r old-source unique-phi-sources new-source)
         (put phi-sources phi new-source)
         (set did-improve true) )))
 
@@ -617,7 +617,8 @@
         ['use (= v)] (schedule/concat new-sch tail)
         _            [stmt tail] )))
 
-(defn to-javascript [occurrences top-level-cf]
+(defn to-javascript [ssa occurrences top-level-cf]
+  (def {:resolve-name resolve-name} ssa)
   (defn tx-label [lbl]
     (assert (int? lbl))
     (string/format "b%d" lbl) )
@@ -635,11 +636,38 @@
       false (string v) ))
   (defn tx-ssa-val [v]
     (assert (ssa-value? v))
-    (pat/match v
+    (pat/match (resolve-name v)
       (or |int? |boolean?) (string v)
       |symbol?             (tx-ssa-node v)
       :empty               "[]"
       |keyword?            (string/format "a%s" v) )) # parameters
+  (defn tx-ssa-truthy [vv]
+    (def v (resolve-name vv))
+    (assert (ssa-value? v))
+    (def opcode (if (symbol? v) (get-in occurrences [:occurrences v 1 1])))
+    (def is-already-a-boolean?
+      (pat/match [v opcode]
+        [true _] true
+        [false _] true
+        [_ (or 'lt 'neq)] true
+        _ false))
+    (if is-already-a-boolean?
+      (tx-ssa-val v)
+      ["truthy(" (tx-ssa-val v) ")"] ))
+  (defn tx-ssa-args [vv]
+    (def v (resolve-name vv))
+    (def inline? (and (symbol? v) (inline-node? v)))
+    (def definition (if inline? (get-in occurrences [:occurrences v 1])))
+    (pp [v definition])
+    (pat/match [v definition]
+      [:empty _]
+        ""
+      [_ [_ 'push [v1 v2] nil]]
+        (let [v1-code (tx-ssa-args v1)
+              v2-code (tx-ssa-val v2)]
+          (if (= v1-code "") v2-code [v1-code ", " v2-code]) )
+      # else
+        ["..." (tx-ssa-val v)] ))
 
   # `tx-insn` and `tx-control-flow` return a schedule and a nullary function `f`.
   # `f` can only be called after `inlining-decisions` is completely populated,
@@ -742,14 +770,14 @@
           1            # shouldn't be possible for a push() to have multiple occurrences anyway
           barrier/none # no other operation is a barrier
           (schedule/concat (schedule/value args) (schedule/value v))
-          |["[..." (tx-ssa-val args) ", " (tx-ssa-val v) "]"] )
+          |["[" (tx-ssa-args args) ", " (tx-ssa-val v) "]"] )
       [_ 'call [args f] nil]
         (produce-assignment-to-ssa-name
           1 barrier/side-effect?
           (schedule/concat (schedule/value f)
             (schedule/concat (schedule/value args)
               [['side-effect] nil]))
-          |[(tx-ssa-val f) "(..." (tx-ssa-val args) ")"] )
+          |[(tx-ssa-val f) "(" (tx-ssa-args args) ")"] )
       [nil 'put [v1 v2 v3] nil]
         [(schedule/concat (schedule/value v1)
            (schedule/concat (schedule/value v2)
@@ -781,7 +809,7 @@
       [['tcall args f]]
         [(schedule/concat (schedule/value f)
                            (schedule/value args) )
-         |["return " (tx-ssa-val f) "(..." (tx-ssa-val args) ");"] ]
+         |["return " (tx-ssa-val f) "(" (tx-ssa-args args) ");"] ]
       [stmt & rest]
         (let [[rest-sch rest-code] (tx-control-flow rest)]
           (pat/match stmt
@@ -792,7 +820,7 @@
                    [['opaque (merge (schedule/used-regs cf1-sch)
                                     (schedule/used-regs cf2-sch) )]
                     rest-sch])
-                 |["if (truthy(" (tx-ssa-val v) ")) { "
+                 |["if (" (tx-ssa-truthy v) ") { "
                    (cf1-code)
                    " }"
                    (if (empty? cf2)
@@ -844,7 +872,7 @@
   (def do-tree (dominator-tree cfg reverse-postorder))
   (def control-flow (to-structured-control-flow cfg reverse-postorder do-tree))
   (def control-flow (simplify-structured-control-flow control-flow))
-  (def js (to-javascript occurrences control-flow))
+  (def js (to-javascript ssa occurrences control-flow))
 
   { :cfg cfg
     :occurrences occurrences
