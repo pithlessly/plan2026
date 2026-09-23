@@ -1,7 +1,8 @@
 (import pat)
+(import ./ssa/insn)
 
 (def DominatorTree {
-  :dominates? (fn [self b1 b2]
+  :dominates? (fn dominates? [self b1 b2]
     (or (= b1 b2)
         (and (not= b2 :root)
              (:dominates? self b1 ((self :immediate-dominator) b2)) )))
@@ -76,7 +77,7 @@
     (def bb (cfg bb-id))
     (def {:insns insns :succs succs} bb)
     (var [code bb-body]
-      (pat/match (last insns)
+      (pat/match (-?> (last insns) (:destruct))
         [nil 'jmp [] nil]
           [(inline-or-jmp (first succs))
            (array/slice insns 0 -2)]
@@ -87,12 +88,13 @@
           [[['tcall args f]]
            (array/slice insns 0 -2)]
         # else
-          (do (assert (= 1 (length succs)))
+        i
+          (do (assert (= 1 (length succs)) (string/format "%q" i))
               (def bb-next (first succs))
               (assert (not (inline? (cfg bb-next))))
               [(inline-or-jmp bb-next) insns] )))
     (def bb-body [
-      ;(seq [[r phi] :pairs (bb :phi-regs)] [phi 'phi [] r])
+      ;(seq [[r phi] :pairs (bb :phi-regs)] (insn/new phi 'phi [] r))
       ;bb-body
       ;(or (bb :upsilon-insns) [])
     ])

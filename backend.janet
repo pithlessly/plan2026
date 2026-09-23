@@ -91,13 +91,14 @@
 # - :node-definition symbol ↦ <js>
 
 (def- Translator @{
-  :ssa-node (fn [self v]
+  :ssa-node (fn ssa-node [self v]
     (assert (symbol? v))
+    (def v (:resolve-name (self :ssa) v))
     (pat/match ((self :inline-node?) v)
       true  (assert ((self :node-definition) v))
       false (string v) ))
 
-  :ssa-val (fn [self v]
+  :ssa-val (fn ssa-val [self v]
     (assert (ssa/value? v))
     (pat/match (:resolve-name (self :ssa) v)
       (or |int? |boolean?) (string v)
@@ -105,25 +106,24 @@
       :empty               "[]"
       |keyword?            (string/format "a%s" v) )) # parameters
 
-  :ssa-truthy? (fn [self vv]
-    (assert (ssa/value? vv))
-    (def v (:resolve-name (self :ssa) vv))
-    (def opcode (if (symbol? v) (get-in self [:ssa :occurrences v 1 1])))
+  :ssa-truthy? (fn ssa-truthy? [self v]
+    (assert (ssa/value? v))
+    (def v (:resolve-name (self :ssa) v))
     (def is-already-a-boolean?
-      (pat/match [v opcode]
-        [true _] true
-        [false _] true
-        [_ (or 'lt 'neq)] true
-        _ false))
+      (pat/match v
+        true     true
+        false    true
+        |symbol? (:boolean? (get-in self [:ssa :occurrences v 1]))
+        _        false))
     (if is-already-a-boolean?
       (:ssa-val self v)
       ["truthy(" (:ssa-val self v) ")"] ))
 
-  :ssa-args (fn [self vv]
-    (assert (ssa/value? vv))
-    (def v (:resolve-name (self :ssa) vv))
+  :ssa-args (fn ssa-args [self v]
+    (assert (ssa/value? v))
+    (def v (:resolve-name (self :ssa) v))
     (def inline? (and (symbol? v) ((self :inline-node?) v)))
-    (def definition (if inline? (get-in self [:ssa :occurrences v 1])))
+    (def definition (if inline? (:destruct (get-in self [:ssa :occurrences v 1]))))
     (pat/match [v definition]
       [:empty _]
         ""
@@ -259,7 +259,7 @@
   (defn tx-insn [insn kont]
     (defn statement [stmt-plan] (plan/concat stmt-plan kont))
     (defn assign-name [o rhs-xplan] (plan/assign-name ssa inline-node? o rhs-xplan kont))
-    (pat/match insn
+    (pat/match (:destruct insn)
       [nil 'ups [v] r]      (statement (plan/upsilon v r))
       [o 'phi [] r]         (assign-name o (plan/phi r))
       [o 'ldc [] i]         (assign-name o (plan/pure-expr [] (fn [_] ["ldc(" (string i) ")"])))

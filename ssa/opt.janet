@@ -1,5 +1,7 @@
 (import pat)
-(import ./utils :prefix "")
+(import ../utils :prefix "")
+(import ../ssa)
+(import ./insn :as insn)
 
 (defn reverse-postorder-traversal [cfg]
   (def order @[])
@@ -87,10 +89,13 @@
 (defn resolve-all-names! [func]
   (def {:cfg cfg} func)
   (each bb cfg
-    (update-each (bb :insns)
-      (fn [[output opcode inputs immediates]]
-        [(:resolve-name func output) opcode [;(map |(:resolve-name func $) inputs)] immediates] ))
-    (update-each (bb :defined-regs) |(:resolve-name func $)) ))
+    (each insn (bb :insns)
+      (def {:out out :inputs inputs} insn)
+      (assert (= (:resolve-name func out) out))
+      (eachk i inputs
+        (def resolved (:resolve-name func (inputs i)))
+        (assert (= resolved (:resolve-name func resolved)))
+        (put inputs i resolved) ))))
 
 (defn to-phi-upsilon-form! [cfg]
   (each bb cfg
@@ -112,12 +117,12 @@
     (eachp [r v] (or (requisite-insns bb-id) {})
       (update bb :upsilon-insns
         (fn [old]
-          (array/push (or old @[]) [nil 'ups [v] r]) )))))
+          (array/push (or old @[]) (insn/new nil 'ups [v] r)) )))))
 
 (defn occurrence-analysis [func]
   (def {:cfg cfg :reverse-postorder reverse-postorder} func)
   # name ↦ @[bb-id definition occurrences]
-  # `definition` is the defining insn, or ~(phi ,r) for phi nodes
+  # `definition` is the defining insn
   (def occurrences @{})
   (def all-phi-regs @{})
   # populate with the insns in each bb
@@ -126,17 +131,16 @@
       # this phi node must define a new name
       (assert (not (has-key? occurrences phi)))
       (put all-phi-regs r true)
-      (put occurrences phi @[bb-id ~(phi ,r) 0]) )
+      (put occurrences phi @[bb-id (insn/new phi 'phi [] r) 0]) )
     (each insn [;(bb :insns) ;(or (bb :upsilon-insns) [])]
-      (def [output _ inputs _] insn)
-      (each input inputs
+      (each input (insn :inputs)
         (when (symbol? input)
           (def resolved (:resolve-name func input))
           # definitions dominate uses, and we visit in reverse postorder,
           # so the definition must have already been visited
           (assert (has-key? occurrences resolved))
           (update (occurrences resolved) 2 inc) ))
-      (when output
+      (when-let [output (insn :out)]
         (assert (not (has-key? occurrences output)))
         (put occurrences output @[bb-id insn 0]) )))
   {:occurrences occurrences

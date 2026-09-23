@@ -11,8 +11,8 @@
   acc)
 
 (def Queue @{
-  :enqueue (fn [self x] (array/push (self :alt) x))
-  :dequeue (fn [self]
+  :enqueue (fn enqueue [self x] (array/push (self :alt) x))
+  :dequeue (fn dequeue [self]
     (var main (self :main))
     (unless (< (self :pos) (length main))
       (array/clear main)
@@ -27,7 +27,7 @@
     (set (main pos) nil) # so GC knows we're done with it
     (set (self :pos) (inc pos))
     elt)
-  :as-list (fn [self]
+  :as-list (fn as-list [self]
     (tuple/join (slice (self :main) (self :pos)) (self :alt)) )
 })
 
@@ -35,11 +35,11 @@
   (table/setproto @{:pos 0 :main @[] :alt @[]} Queue))
 
 (def Worklist @{
-  :next (fn [self]
+  :next (fn next [self]
     (def elt (:dequeue (self :queue)))
     (put (self :contains) elt nil)
     elt)
-  :add (fn [self elt]
+  :add (fn add [self elt]
     (unless ((self :contains) elt)
       (put (self :contains) elt true)
       (:enqueue (self :queue) elt) ))

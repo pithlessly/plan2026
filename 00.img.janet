@@ -1,7 +1,8 @@
 (import pat)
 (import ./build-cfg)
 (import ./ssa)
-(import ./ssa-opt)
+(import ./ssa/func :as ssa)
+(import ./ssa/opt :as ssa/opt)
 (import ./reconstruct-control-flow :as cf)
 (import ./backend)
 
@@ -13,12 +14,12 @@
     (each [opcode data] (bb :old-insns)
       (printf "             %-5s %p" opcode (freeze data)) )
     (print "new:")
-    (each [output-name opcode input-names immediates] (bb :insns)
+    (each insn (bb :insns)
       (printf "    %-8s %-5s %p%V"
-        (string/format "%V" output-name)
-        opcode
-        (tuple/join input-names)
-        (and immediates (string/format " %p" immediates)) ))
+        (string/format "%V" (insn :out))
+        (insn :opcode)
+        (tuple/join (insn :inputs))
+        (-?>> (insn :immediates) (string/format " %p")) ))
     (print "defined-regs:")
     (each [r v] (sort (pairs (bb :defined-regs)))
       (printf "    %-10s %q" (string r) v) )
@@ -48,16 +49,18 @@
   (def cfg (build-cfg/build bytecode))
   (def ssa (ssa/new-function parameter-slots))
   (merge-into ssa (ssa/build-cfg ssa cfg))
-  (merge-into ssa (ssa-opt/reverse-postorder-traversal (ssa :cfg)))
-  (merge-into ssa (ssa-opt/simplify-phis! ssa))
-  (ssa-opt/resolve-all-names! ssa) # not strictly necessary, but useful for pretty printing
-  (ssa-opt/to-phi-upsilon-form! (ssa :cfg))
+  (merge-into ssa (ssa/opt/reverse-postorder-traversal (ssa :cfg)))
+  (merge-into ssa (ssa/opt/simplify-phis! ssa))
+  (ssa/opt/resolve-all-names! ssa) # not strictly necessary, but useful for pretty printing
+  (ssa/opt/to-phi-upsilon-form! (ssa :cfg))
   (each bb (ssa :cfg) (:freeze! bb))
-  (merge-into ssa (ssa-opt/occurrence-analysis ssa))
+  (merge-into ssa (ssa/opt/occurrence-analysis ssa))
   (merge-into ssa {:do-tree (cf/dominator-tree ssa)})
   (def control-flow (cf/to-structured-control-flow ssa))
   (def control-flow (cf/simplify-structured-control-flow control-flow))
   (def js (backend/to-javascript ssa control-flow))
+
+  (pp assembly)
 
   { :cfg (ssa :cfg)
     :occurrences (ssa :occurrences)
@@ -81,12 +84,23 @@
         (put solutions {i true j true k true} true))))
   (map keys (keys solutions)))
 
-(def res
+(def compilation-results
   (with-dyns [*out* stderr *pretty-format* "%P"]
     (recompile (disasm sum3)) ))
 
-(printf "%m" (res :occurrences))
-(dump-cfg (res :cfg))
-(printf "%m" (res :control-flow))
-(printf "%m" (res :inlining-decisions))
-(printf "%m" (res :js))
+(def debug-output-file "_debug.janet")
+(def js-output-file "compiled.js")
+
+(with [f (file/open js-output-file :wn)]
+  (with [proc (os/spawn ["prettier" "--parser" "babel"] :px { :in :pipe :out f })]
+    (:write (proc :in) (compilation-results :js)) ))
+(eprintf "wrote compiled JS to %s." js-output-file)
+
+(with [f (file/open debug-output-file :wn)]
+  (with-dyns [*out* f]
+    (printf "%m" (compilation-results :occurrences))
+    (dump-cfg (compilation-results :cfg))
+    (printf "%m" (compilation-results :control-flow))
+    (printf "%m" (compilation-results :inlining-decisions))
+    (printf "%m" (compilation-results :js)) )
+  (eprintf "wrote debug info %s." debug-output-file) )
