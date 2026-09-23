@@ -246,7 +246,7 @@
     # up front, and the schedule needs to reflect this
     { :sch  (schedule/concat (rhs-xplan :sch) (cont-plan :sch))
       :emit (fn [tx]
-              [(:ssa-node tx output-name) " = " ((rhs-xplan :emit) tx) ";"
+              ["let " (:ssa-node tx output-name) " = " ((rhs-xplan :emit) tx) ";"
                ((cont-plan :emit) tx) ])
     }))
 
@@ -313,10 +313,7 @@
               (fold-right tx-insn rest-plan insns) ))))
 
   (def top-level-plan (tx-control-flow top-level-cf))
-  (def declared-local-vars
-    [;(map tx-register (sort (keys (ssa :all-phi-regs))))
-     ;(seq [[node do-inline?] :pairs inline-node?
-            :unless do-inline?] node)])
+  (def declared-local-vars (map tx-register (sort (keys (ssa :all-phi-regs)))))
 
   (def tx (table/setproto @{:ssa ssa :inline-node? inline-node? :node-definition @{}} Translator))
   (def js ((top-level-plan :emit) tx))
