@@ -60,8 +60,6 @@
   (def control-flow (cf/simplify-structured-control-flow control-flow))
   (def js (backend/to-javascript ssa control-flow))
 
-  (pp assembly)
-
   { :cfg (ssa :cfg)
     :occurrences (ssa :occurrences)
     :control-flow control-flow

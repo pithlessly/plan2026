@@ -104,6 +104,7 @@
       (or |int? |boolean?) (string v)
       |symbol?             (:ssa-node self v)
       :empty               "[]"
+      :nil                 "undefined"
       |keyword?            (string/format "a%s" v) )) # parameters
 
   :ssa-truthy? (fn ssa-truthy? [self v]
@@ -113,7 +114,8 @@
       (pat/match v
         true     true
         false    true
-        |symbol? (:boolean? (get-in self [:ssa :occurrences v 1]))
+        :nil     true
+        |symbol? (:boolean? (:definition (self :ssa) v))
         _        false))
     (if is-already-a-boolean?
       (:ssa-val self v)
@@ -123,7 +125,7 @@
     (assert (ssa/value? v))
     (def v (:resolve-name (self :ssa) v))
     (def inline? (and (symbol? v) ((self :inline-node?) v)))
-    (def definition (if inline? (:destruct (get-in self [:ssa :occurrences v 1]))))
+    (def definition (if inline? (:destruct (:definition (self :ssa) v))))
     (pat/match [v definition]
       [:empty _]
         ""
@@ -268,10 +270,13 @@
       [o 'len [v] nil]      (assign-name o (plan/impure-call "len" v)) # length() can error
       [o 'addim [v] x]      (assign-name o (plan/impure-expr [v]
                               |["add(" (:ssa-val $ v) ", " (string x) ")"] ))
-      [o 'sub [v1 v2] nil]  (assign-name o (plan/impure-call "sub" v1 v2)) # sub() can ereror
+      [o 'add [v1 v2] nil]  (assign-name o (plan/impure-call "add" v1 v2)) # add() can error
+      [o 'sub [v1 v2] nil]  (assign-name o (plan/impure-call "sub" v1 v2)) # sub() can error
       [o 'lt [v1 v2] nil]   (assign-name o (plan/pure-call "lt" v1 v2))
       [o 'neq [v1 v2] nil]  (assign-name o (plan/pure-call "neq" v1 v2))
       [o 'get [v1 v2] nil]  (assign-name o (plan/impure-call "get" v1 v2)) # get() can error
+      [o 'geti [v] i]       (assign-name o (plan/impure-expr [v]           # get() can error
+                              |["get(" (:ssa-val $ v) ", " (string i) ")"] ))
       [nil 'put [v1 v2 v3] nil]
                             (statement (plan/impure-expr [v1 v2 v3]
                               |["put(" (:ssa-val $ v1) ", " (:ssa-val $ v2) ", " (:ssa-val $ v3) ");"] ))
@@ -298,6 +303,9 @@
       [['tcall args f]]
         { :sch  (schedule/concat (schedule/value f) (schedule/value args))
           :emit |["return " (:ssa-val $ f) "(" (:ssa-args $ args) ");"] }
+      [['ret x]]
+        { :sch  (schedule/value x)
+          :emit |["return " (:ssa-val $ x) ";"] }
       [stmt & rest]
         (let [rest-plan (tx-control-flow rest) [rest-sch rest-code] (tx-control-flow rest)]
           (pat/match stmt

@@ -11,9 +11,11 @@
     (set ((self :phi-regs) r) (gensym)) )
   :lookup-reg+ (fn lookup-reg+ [self r]
     (assert (register? r) r)
-    (if-let [v ((self :defined-regs) r)] [v false]
-      (if-let [v ((self :phi-regs) r)] [v false]
-        (let [v (:fresh-phi self r)] [v true]) )))
+    (pat/match r
+      (map (self :defined-regs) (and v (not nil))) [v false]
+      (map (self :phi-regs)     (and v (not nil))) [v false]
+      _                                            (let [v (:fresh-phi self r)]
+                                                     [v true] )))
   :lookup-reg (fn lookup-reg [self r] (first (:lookup-reg+ self r)))
   :update-reg (fn update-reg [self r v]
     (:assert-mutable self)
@@ -60,6 +62,8 @@
   # requires :elided-phi-nodes to be set
   :resolve-name (fn resolve-name [self name]
     (or ((self :elided-phi-nodes) name) name) )
+  :definition (fn [self name]
+    ((assert ((self :occurrences) name)) 1) )
 })
 
 (defn new-function [parameter-slots]
@@ -89,8 +93,12 @@
         (:update-reg bb output-reg (first input-names))
       'ldi
         (:update-reg bb output-reg immediates)
+      'ldf
+        (:update-reg bb output-reg false)
       'ldt
         (:update-reg bb output-reg true)
+      'ldn
+        (:update-reg bb output-reg :nil)
       (or 'push 'push2 'push3)
         (each i input-names
           (:emit-push bb i))

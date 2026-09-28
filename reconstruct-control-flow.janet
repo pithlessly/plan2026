@@ -50,7 +50,8 @@
 #   (block <label> <control-flow>) <control-flow>
 #   (loop <label> <control-flow>)
 #   (jmp <label>)
-#   (tcall <value>)
+#   (tcall <value> <value>)
+#   (ret <value>)
 #   (if <value> (<control-flow>) (<control-flow>))
 #   (do <ssa-insn>*) <control-flow>
 (defn to-structured-control-flow [{:cfg cfg :reverse-postorder reverse-postorder :do-tree do-tree}]
@@ -86,6 +87,9 @@
            (array/slice insns 0 -2)]
         [nil 'tcall [args f] nil]
           [[['tcall args f]]
+           (array/slice insns 0 -2)]
+        [nil 'ret [x] nil]
+          [[['ret x]]
            (array/slice insns 0 -2)]
         # else
         i
@@ -149,6 +153,8 @@
                            [(:syntax-of ctx-entry)] )))
       [['tcall args f]]
         [['tcall args f]]
+      [['ret x]]
+        [['ret x]]
       [['if condition cf1 cf2]]
         [['if condition (recurse cf1 innermost-label ctx) (recurse cf2 innermost-label ctx)]]
       [['do & insns] & cf1]

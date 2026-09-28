@@ -11,12 +11,16 @@
   (pat/match insn
 
     ['addim y x c] [y   [x] c   [1]]
+    ['add _ _ _]   (one-output)
     ['call _ _]    (one-output)
     ['get _ _ _]   (one-output)
+    ['geti y x i]  [y   [x] i   [1]]
     ['jmpno x o]   [nil [x] nil [1 o]]
     ['jmp o]       [nil []  nil [o]]
     ['ldc y c]     [y   []  c   [1]]
+    ['ldf y]       (one-output)
     ['ldi y c]     [y   []  c   [1]]
+    ['ldn y]       (one-output)
     ['ldt y]       (one-output)
     ['len _ _]     (one-output)
     ['lt _ _ _]    (one-output)
@@ -25,14 +29,15 @@
     ['movf x y]    (y   [x] nil [1])
     ['movn _ _]    (one-output)
     ['neq _ _ _]   (one-output)
-    ['push x]      (no-output)
     ['push2 x y]   (no-output)
     ['push3 x y z] (no-output)
+    ['push x]      (no-output)
     ['put x y z]   (no-output)
+    ['ret x]       [nil [x] nil []]
     ['sub _ _ _]   (one-output)
     ['tcall x]     [nil [x] nil []]
 
-    o              (errorf "%q" o) ))
+    o              (errorf "classify-args: not handled: %q" o) ))
 
 (defn build [bytecode]
   (def bytecode-args (map classify-args bytecode))
