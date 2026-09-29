@@ -71,8 +71,18 @@
         ['use (= v)] (schedule/concat new-sch tail)
         _            [stmt tail] )))
 
-# JS code is generated as a tree of strings which is ultimately flattened.
-# <js> ::= string | [<js>*]
+# JS code is generated in an intermediate form, called script.
+# Converting script to actual JS consists of replacing variables
+# with their definitions if they are marked as to be inlined,
+# making a few other substitutions based on the nature of these values,
+# and then flattening.
+# <script> ::= string
+#           | [:name <ssa-name>]
+#           | [:val <ssa-name>]
+#           | [:truthy? <ssa-name>]
+#           | [:args <ssa-name>]
+#           | [:put-def <ssa-name> <script>]
+#           | [<script>*]
 
 (defn- tx-label [lbl]
   (assert (int? lbl))
@@ -88,9 +98,120 @@
 # Fields:
 # - :ssa             SsaFunction
 # - :inline-node?    symbol ↦ bool
-# - :node-definition symbol ↦ <js>
+# - :node-definition symbol ↦ <script>
 
-(def- Translator @{
+# A barrier is a function which decides whether a piece of code
+# can be reordered across part of a schedule.
+# <barrier> ::= fn [<schedule-entry>] → bool
+
+(defn barrier/assigns-reg? [r]
+  |(pat/match $ ['ups (= r)] true
+                ['opaque s]  (s r)
+                _            false))
+(defn barrier/side-effect? [entry]
+  (pat/match entry ['side-effect] true
+                   ['opaque _]    true
+                   _              false))
+(defn barrier/none [_] false)
+
+# A *plan* is a function that performs code generation along with a summary
+# in the form of a schedule.
+# <plan> ::= {
+#   :sch   <schedule>
+#   :code  <script>
+# }
+# A plan can also be extended with two fields which describe
+# <extended-plan> ::= <plan> & {
+#   :max-occurrences  int | nil
+#   :barrier          <barrier>
+# }
+
+(defn plan/concat [p1 p2]
+  { :sch  (schedule/concat (p1 :sch) (p2 :sch))
+    :code [(p1 :code) (p2 :code)] })
+
+(def plan/empty
+  { :sch nil
+    :code [] })
+
+(defn plan/if-else [v plan1 plan2]
+  (def regs (merge (schedule/used-regs (plan1 :sch))
+                   (if-not plan2 {} (schedule/used-regs (plan2 :sch))) ))
+  { :sch  (schedule/concat (schedule/value v) [['opaque regs] nil])
+    :code ["if (" [:truthy? v] ") { "
+           (plan1 :code)
+           " }"
+           (if-not plan2 []
+             [" else { "
+              (plan2 :code)
+              " }"]) ]})
+
+(defn plan/infinite-loop [lbl body-plan]
+  (def regs (schedule/used-regs (body-plan :sch)))
+  { :sch  [['opaque regs] nil]
+    :code [(tx-label lbl) ": for (;;) { " (body-plan :code) " }"] })
+
+(defn plan/do-while-false [lbl body-plan]
+  (def regs (schedule/used-regs (body-plan :sch)))
+  { :sch  [['opaque regs] nil]
+    :code [(tx-label lbl) ": do { " (body-plan :code) " } while (false);"] })
+
+(defn plan/upsilon [v r]
+  { :sch             (schedule/concat (schedule/value v) [['ups r] nil])
+    :code            [(tx-register r) " = " [:val v] ";"] })
+
+(defn plan/phi [r]
+  { :max-occurrences nil # phis can be inlined even if used more than once
+    :barrier         (barrier/assigns-reg? r)
+    :sch             [['phi r] nil]
+    :code            (tx-register r) })
+
+(defn plan/pure-expr [vs code]
+  { :max-occurrences 1
+    :barrier         barrier/none
+    :sch             (fold-right |(schedule/concat (schedule/value $0) $1) nil vs)
+    :code            code })
+
+(defn plan/pure-call [f-name & vs]
+  (plan/pure-expr vs [f-name "(" (interpose "," (map |[:val $] vs)) ")"]) )
+
+(defn plan/impure-expr [vs code]
+  { :max-occurrences 1
+    :barrier         barrier/side-effect?
+    :sch             (fold-right |(schedule/concat (schedule/value $0) $1)
+                                 [['side-effect] nil] vs)
+    :code            code })
+
+(defn plan/impure-call [f-name & vs]
+  (plan/impure-expr vs [f-name "(" (interpose "," (map |[:val $] vs)) ")"]) )
+
+(defn plan/assign-name [ssa inline-node? output-name rhs-xplan cont-plan]
+  (assert (symbol? output-name))
+  (def max-occurrences rhs-xplan)
+  (def occurrences (((ssa :occurrences) output-name) 2))
+  (def do-inline?
+    (and # there must not be too many occurrences
+         (if max-occurrences (<= occurrences max-occurrences) true)
+         # we must be able to find all the occurrences in the tail schedule
+         (= occurrences (schedule/count-uses (cont-plan :sch) output-name))
+         # and these occurrences must not occur after a barrier in the schedule
+         (schedule/uses-value-inlineably? (cont-plan :sch) (rhs-xplan :barrier) output-name) ))
+  (put inline-node? output-name do-inline?)
+  (if do-inline?
+    # we marked that this node will be inlined, so we don't
+    # have to emit a let binding
+    { :sch  (schedule/substitute-uses (cont-plan :sch) output-name (rhs-xplan :sch))
+      :code [[:put-def output-name (rhs-xplan :code)] (cont-plan :code)]
+    }
+    # if we don't inline it, then we do compute its definition
+    # up front, and the schedule needs to reflect this
+    { :sch  (schedule/concat (rhs-xplan :sch) (cont-plan :sch))
+      :code ["let " [:name output-name] " = " (rhs-xplan :code) ";" (cont-plan :code)]
+    }))
+
+# Collects some state involved in lowering from script to actual JS code.
+
+(def- Translator {
   :ssa-node (fn ssa-node [self v]
     (assert (symbol? v))
     (def v (:resolve-name (self :ssa) v))
@@ -135,128 +256,23 @@
           (if (= v1-code "") v2-code [v1-code ", " v2-code]) )
       # else
         ["..." (:ssa-val self v)] ))
+
+  :script (fn script [self script]
+    (pat/match script
+      |string?       script
+      [:name v]      (:ssa-node self v)
+      [:val v]       (:ssa-val self v)
+      [:truthy? v]   (:ssa-truthy? self v)
+      [:args v]      (:ssa-args self v)
+      [:put-def o s] (do (put (self :node-definition) o (:script self s)) [])
+      |indexed?      (map |(:script self $) script) ))
 })
 
-# A barrier is a function which decides whether a piece of code
-# can be reordered across part of a schedule.
-# <barrier> ::= fn [schedule-entry] → bool
-
-(defn barrier/assigns-reg? [r]
-  |(pat/match $ ['ups (= r)] true
-                ['opaque s]  (s r)
-                _            false))
-(defn barrier/side-effect? [entry]
-  (pat/match entry ['side-effect] true
-                   ['opaque _]    true
-                   _              false))
-(defn barrier/none [_] false)
-
-# A *plan* is a function that performs code generation along with a summary
-# in the form of a schedule.
-# <plan> ::= {
-#   :sch   <schedule>
-#   :emit  fn [Translator] → <js>
-# }
-# A plan can also be extended with two fields which describe
-# <extended-plan> ::= <plan> & {
-#   :max-occurrences  int | nil
-#   :barrier          <barrier>
-# }
-
-(defn plan/concat [p1 p2]
-  { :sch  (schedule/concat (p1 :sch) (p2 :sch))
-    :emit |[((p1 :emit) $) ((p2 :emit) $)] })
-
-(def plan/empty
-  { :sch nil
-    :emit (fn [_] []) })
-
-(defn plan/if-else [v plan1 plan2]
-  (def regs (merge (schedule/used-regs (plan1 :sch))
-                   (if-not plan2 {} (schedule/used-regs (plan2 :sch))) ))
-  { :sch  (schedule/concat (schedule/value v) [['opaque regs] nil])
-    :emit |["if (" (:ssa-truthy? $ v) ") { "
-            ((plan1 :emit) $)
-            " }"
-            (if-not plan2 []
-              [" else { "
-               ((plan2 :emit) $)
-               " }"]) ]})
-
-(defn plan/infinite-loop [lbl body-plan]
-  (def regs (schedule/used-regs (body-plan :sch)))
-  { :sch  [['opaque regs] nil]
-    :emit |[(tx-label lbl) ": for (;;) { " ((body-plan :emit) $) " }"] })
-
-(defn plan/do-while-false [lbl body-plan]
-  (def regs (schedule/used-regs (body-plan :sch)))
-  { :sch  [['opaque regs] nil]
-    :emit |[(tx-label lbl) ": do { " ((body-plan :emit) $) " } while (false);"] })
-
-(defn plan/upsilon [v r]
-  { :sch             (schedule/concat (schedule/value v) [['ups r] nil])
-    :emit            |[(tx-register r) " = " (:ssa-val $ v) ";"] })
-
-(defn plan/phi [r]
-  { :max-occurrences nil # phis can be inlined even if used more than once
-    :barrier         (barrier/assigns-reg? r)
-    :sch             [['phi r] nil]
-    :emit            (fn [_] (tx-register r)) })
-
-(defn plan/pure-expr [vs emit]
-  { :max-occurrences 1
-    :barrier         barrier/none
-    :sch             (fold-right |(schedule/concat (schedule/value $0) $1) nil vs)
-    :emit            emit })
-
-(defn plan/pure-call [f-name & vs]
-  (plan/pure-expr vs (fn [tx]
-                       [f-name "(" (interpose "," (map |(:ssa-val tx $) vs)) ")"] ) ))
-
-(defn plan/impure-expr [vs emit]
-  { :max-occurrences 1
-    :barrier         barrier/side-effect?
-    :sch             (fold-right |(schedule/concat (schedule/value $0) $1)
-                                 [['side-effect] nil] vs)
-    :emit            emit })
-
-(defn plan/impure-call [f-name & vs]
-  (plan/impure-expr vs (fn [tx]
-                         [f-name "(" (interpose "," (map |(:ssa-val tx $) vs)) ")"]) ))
-
-(defn plan/assign-name [ssa inline-node? output-name rhs-xplan cont-plan]
-  (assert (symbol? output-name))
-  (def max-occurrences rhs-xplan)
-  (def occurrences (((ssa :occurrences) output-name) 2))
-  (def do-inline?
-    (and # there must not be too many occurrences
-         (if max-occurrences (<= occurrences max-occurrences) true)
-         # we must be able to find all the occurrences in the tail schedule
-         (= occurrences (schedule/count-uses (cont-plan :sch) output-name))
-         # and these occurrences must not occur after a barrier in the schedule
-         (schedule/uses-value-inlineably? (cont-plan :sch) (rhs-xplan :barrier) output-name) ))
-  (put inline-node? output-name do-inline?)
-  (if do-inline?
-    # we marked that this node will be inlined, so we don't
-    # have to emit any extra code for its definition up front
-    { :sch  (schedule/substitute-uses (cont-plan :sch) output-name (rhs-xplan :sch))
-      :emit (fn [tx]
-              (put (tx :node-definition) output-name ((rhs-xplan :emit) tx))
-              ((cont-plan :emit) tx) )
-    }
-    # if we don't inline it, then we do compute its definition
-    # up front, and the schedule needs to reflect this
-    { :sch  (schedule/concat (rhs-xplan :sch) (cont-plan :sch))
-      :emit (fn [tx]
-              ["let " (:ssa-node tx output-name) " = " ((rhs-xplan :emit) tx) ";"
-               ((cont-plan :emit) tx) ])
-    }))
+(defn new-translator [ssa inline-node?]
+  (struct/with-proto Translator
+    :ssa ssa :inline-node? inline-node? :node-definition @{} ))
 
 (defn to-javascript [ssa top-level-cf]
-  # `tx-insn` and `tx-control-flow` return a plan. The plan's emit function
-  # can only be called after `inlining-decisions` is completely populated,
-  # and returns the compiled JS.
-
   (def inline-node? @{})
   (defn tx-insn [insn kont]
     (defn statement [stmt-plan] (plan/concat stmt-plan kont))
@@ -264,30 +280,30 @@
     (pat/match (:destruct insn)
       [nil 'ups [v] r]      (statement (plan/upsilon v r))
       [o 'phi [] r]         (assign-name o (plan/phi r))
-      [o 'ldc [] i]         (assign-name o (plan/pure-expr [] (fn [_] ["ldc(" (string i) ")"])))
-      [o 'mktab [] nil]     (assign-name o (plan/impure-expr [] (fn [_] "new Map()")))
+      [o 'ldc [] i]         (assign-name o (plan/pure-expr [] ["ldc(" (string i) ")"]))
+      [o 'mktab [] nil]     (assign-name o (plan/impure-expr [] "new Map()"))
       [o 'mkstu [args] nil] (assign-name o (plan/impure-call "mkstu" args)) # mkstu() can error
       [o 'len [v] nil]      (assign-name o (plan/impure-call "len" v)) # length() can error
       [o 'addim [v] x]      (assign-name o (plan/impure-expr [v]
-                              |["add(" (:ssa-val $ v) ", " (string x) ")"] ))
+                              ["add(" [:val v] ", " (string x) ")"] ))
       [o 'add [v1 v2] nil]  (assign-name o (plan/impure-call "add" v1 v2)) # add() can error
       [o 'sub [v1 v2] nil]  (assign-name o (plan/impure-call "sub" v1 v2)) # sub() can error
       [o 'lt [v1 v2] nil]   (assign-name o (plan/pure-call "lt" v1 v2))
       [o 'neq [v1 v2] nil]  (assign-name o (plan/pure-call "neq" v1 v2))
       [o 'get [v1 v2] nil]  (assign-name o (plan/impure-call "get" v1 v2)) # get() can error
       [o 'geti [v] i]       (assign-name o (plan/impure-expr [v]           # get() can error
-                              |["get(" (:ssa-val $ v) ", " (string i) ")"] ))
+                              ["get(" [:val v] ", " (string i) ")"] ))
       [nil 'put [v1 v2 v3] nil]
                             (statement (plan/impure-expr [v1 v2 v3]
-                              |["put(" (:ssa-val $ v1) ", " (:ssa-val $ v2) ", " (:ssa-val $ v3) ");"] ))
+                              ["put(" [:val v1] ", " [:val v2] ", " [:val v3] ");"] ))
       [o 'push [args v] nil]
                             # :max-occurrences is 1 here, but it shouldn't be possible for a
                             # push() to have multiple occurrences anyway
                             (assign-name o (plan/pure-expr [args v]
-                              |["[" (:ssa-args $ args) ", " (:ssa-val $ v) "]"] ))
+                              ["[" [:args args] ", " [:val v] "]"] ))
       [o 'call [args f] nil]
                             (assign-name o (plan/impure-expr [f args]
-                              |[(:ssa-val $ f) "(" (:ssa-args $ args) ")"] ))
+                              [[:val f] "(" [:args args] ")"] ))
       # else
         # (string/format "/* unhandled insn: %q */" insn)
         (errorf "unhandled insn: %Q" insn) ))
@@ -297,15 +313,15 @@
       []
         plan/empty
       [[(or 'loop-break 'block-break) lbl]]
-        { :sch nil :emit (fn [_] ["break " (tx-label lbl) ";"]) }
+        { :sch nil :code ["break " (tx-label lbl) ";"] }
       [['loop-continue lbl]]
-        { :sch nil :emit (fn [_] ["continue " (tx-label lbl) ";"]) }
+        { :sch nil :code ["continue " (tx-label lbl) ";"] }
       [['tcall args f]]
         { :sch  (schedule/concat (schedule/value f) (schedule/value args))
-          :emit |["return " (:ssa-val $ f) "(" (:ssa-args $ args) ");"] }
+          :code ["return " [:val f] "(" [:args args] ");"] }
       [['ret x]]
         { :sch  (schedule/value x)
-          :emit |["return " (:ssa-val $ x) ";"] }
+          :code ["return " [:val x] ";"] }
       [stmt & rest]
         (let [rest-plan (tx-control-flow rest) [rest-sch rest-code] (tx-control-flow rest)]
           (pat/match stmt
@@ -323,8 +339,8 @@
   (def top-level-plan (tx-control-flow top-level-cf))
   (def declared-local-vars (map tx-register (sort (keys (ssa :all-phi-regs)))))
 
-  (def tx (table/setproto @{:ssa ssa :inline-node? inline-node? :node-definition @{}} Translator))
-  (def js ((top-level-plan :emit) tx))
+  (def tx (new-translator ssa inline-node?))
+  (def js (:script tx (top-level-plan :code)))
   (put ssa :inlining-decisions inline-node?)
   (string/join
     (flatten
