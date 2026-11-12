@@ -250,7 +250,7 @@
     (pat/match [v definition]
       [:empty _]
         ""
-      [_ [_ 'push [v1 v2] nil]]
+      [_ [_ 'push [v1 v2] []]]
         (let [v1-code (:ssa-args self v1)
               v2-code (:ssa-val self v2)]
           (if (= v1-code "") v2-code [v1-code ", " v2-code]) )
@@ -278,32 +278,32 @@
     (defn statement [stmt-plan] (plan/concat stmt-plan kont))
     (defn assign-name [o rhs-xplan] (plan/assign-name ssa inline-node? o rhs-xplan kont))
     (pat/match (:destruct insn)
-      [nil 'ups [v] r]      (statement (plan/upsilon v r))
-      [o 'phi [] r]         (assign-name o (plan/phi r))
-      [o 'ldc [] i]         (assign-name o (plan/pure-expr [] ["ldc(" (string i) ")"]))
-      [o 'mktab [] nil]     (assign-name o (plan/impure-expr [] "new Map()"))
-      [o 'mkstu [args] nil] (assign-name o (plan/impure-call "mkstu" args)) # mkstu() can error
-      [o 'len [v] nil]      (assign-name o (plan/impure-call "len" v)) # length() can error
-      [o 'addim [v] x]      (assign-name o (plan/impure-expr [v]
+      [nil 'ups [v] [r]]      (statement (plan/upsilon v r))
+      [o 'phi [] [r]]         (assign-name o (plan/phi r))
+      [o 'ldc [] [i]]         (assign-name o (plan/pure-expr [] ["ldc(" (string i) ")"]))
+      [o 'mktab [] []]        (assign-name o (plan/impure-expr [] "new JanetTable()"))
+      [o 'mkstu [args] []]    (assign-name o (plan/impure-call "mkstu" args)) # mkstu() can error
+      [o 'len [v] []]         (assign-name o (plan/impure-call "len" v)) # length() can error
+      [o 'addim [v] [x]]      (assign-name o (plan/impure-expr [v]
                               ["add(" [:val v] ", " (string x) ")"] ))
-      [o 'add [v1 v2] nil]  (assign-name o (plan/impure-call "add" v1 v2)) # add() can error
-      [o 'sub [v1 v2] nil]  (assign-name o (plan/impure-call "sub" v1 v2)) # sub() can error
-      [o 'lt [v1 v2] nil]   (assign-name o (plan/pure-call "lt" v1 v2))
-      [o 'neq [v1 v2] nil]  (assign-name o (plan/pure-call "neq" v1 v2))
-      [o 'get [v1 v2] nil]  (assign-name o (plan/impure-call "get" v1 v2)) # get() can error
-      [o 'geti [v] i]       (assign-name o (plan/impure-expr [v]           # get() can error
+      [o 'add [v1 v2] []]     (assign-name o (plan/impure-call "add" v1 v2)) # add() can error
+      [o 'sub [v1 v2] []]     (assign-name o (plan/impure-call "sub" v1 v2)) # sub() can error
+      [o 'lt [v1 v2] []]      (assign-name o (plan/pure-call "lt" v1 v2))
+      [o 'neq [v1 v2] []]     (assign-name o (plan/pure-call "neq" v1 v2))
+      [o 'get [v1 v2] []]     (assign-name o (plan/impure-call "get" v1 v2)) # get() can error
+      [o 'geti [v] [i]]       (assign-name o (plan/impure-expr [v]           # get() can error
                               ["get(" [:val v] ", " (string i) ")"] ))
-      [nil 'put [v1 v2 v3] nil]
-                            (statement (plan/impure-expr [v1 v2 v3]
-                              ["put(" [:val v1] ", " [:val v2] ", " [:val v3] ");"] ))
-      [o 'push [args v] nil]
-                            # :max-occurrences is 1 here, but it shouldn't be possible for a
-                            # push() to have multiple occurrences anyway
-                            (assign-name o (plan/pure-expr [args v]
-                              ["[" [:args args] ", " [:val v] "]"] ))
-      [o 'call [args f] nil]
-                            (assign-name o (plan/impure-expr [f args]
-                              [[:val f] "(" [:args args] ")"] ))
+      [nil 'put [v1 v2 v3] []]
+                              (statement (plan/impure-expr [v1 v2 v3]
+                                ["(" [:val v1] ").put(" [:val v2] ", " [:val v3] ");"] ))
+      [o 'push [args v] []]
+                              # :max-occurrences is 1 here, but it shouldn't be possible for a
+                              # push() to have multiple occurrences anyway
+                              (assign-name o (plan/pure-expr [args v]
+                                ["[" [:args args] ", " [:val v] "]"] ))
+      [o 'call [args f] []]
+                              (assign-name o (plan/impure-expr [f args]
+                                [[:val f] "(" [:args args] ")"] ))
       # else
         # (string/format "/* unhandled insn: %q */" insn)
         (errorf "unhandled insn: %Q" insn) ))

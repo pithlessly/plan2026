@@ -81,7 +81,7 @@
 #   in this block associated with a given register.
 
 (defn- build-basic-block [func bb]
-  (each [opcode [output-reg input-regs immediates _]] (bb :old-insns)
+  (each [opcode [output-reg input-regs immediate _]] (bb :old-insns)
     (def input-names
       (seq [r :in input-regs]
         (if (:parameter? func r) (keyword r)
@@ -92,7 +92,7 @@
       (or 'movn 'movf)
         (:update-reg bb output-reg (first input-names))
       'ldi
-        (:update-reg bb output-reg immediates)
+        (:update-reg bb output-reg immediate)
       'ldf
         (:update-reg bb output-reg false)
       'ldt
@@ -105,7 +105,7 @@
       (or 'mkstu 'call 'tcall)
         (:emit-insn bb (insn/new (output-name) opcode [(:take-args-stack bb) ;input-names]))
       # else
-        (:emit-insn bb (insn/new (output-name) opcode [;input-names] immediates)) )))
+        (:emit-insn bb (insn/new (output-name) opcode [;input-names] (and immediate [immediate]))) )))
 
 (defn build-cfg [func old-cfg]
   (def new-cfg

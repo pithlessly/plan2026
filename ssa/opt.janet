@@ -117,7 +117,7 @@
     (eachp [r v] (or (requisite-insns bb-id) {})
       (update bb :upsilon-insns
         (fn [old]
-          (array/push (or old @[]) (insn/new nil 'ups [v] r)) )))))
+          (array/push (or old @[]) (insn/new nil 'ups [v] [r])) )))))
 
 (defn occurrence-analysis [func]
   (def {:cfg cfg :reverse-postorder reverse-postorder} func)
@@ -131,7 +131,7 @@
       # this phi node must define a new name
       (assert (not (has-key? occurrences phi)))
       (put all-phi-regs r true)
-      (put occurrences phi @[bb-id (insn/new phi 'phi [] r) 0]) )
+      (put occurrences phi @[bb-id (insn/new phi 'phi [] [r]) 0]) )
     (each insn [;(bb :insns) ;(or (bb :upsilon-insns) [])]
       (each input (insn :inputs)
         (when (symbol? input)

@@ -19,7 +19,7 @@
         (string/format "%V" (insn :out))
         (insn :opcode)
         (tuple/join (insn :inputs))
-        (-?>> (insn :immediates) (string/format " %p")) ))
+        (let [imms (insn :immediates)] (and (not (empty? imms)) (string/format " %q" imms))) ))
     (print "defined-regs:")
     (each [r v] (sort (pairs (bb :defined-regs)))
       (printf "    %-10s %q" (string r) v) )

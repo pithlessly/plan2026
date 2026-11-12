@@ -79,16 +79,16 @@
     (def {:insns insns :succs succs} bb)
     (var [code bb-body]
       (pat/match (-?> (last insns) (:destruct))
-        [nil 'jmp [] nil]
+        [nil 'jmp [] []]
           [(inline-or-jmp (first succs))
            (array/slice insns 0 -2)]
-        [nil 'jmpno [x] nil]
+        [nil 'jmpno [x] []]
           [[['if x (inline-or-jmp (succs 0)) (inline-or-jmp (succs 1))]]
            (array/slice insns 0 -2)]
-        [nil 'tcall [args f] nil]
+        [nil 'tcall [args f] []]
           [[['tcall args f]]
            (array/slice insns 0 -2)]
-        [nil 'ret [x] nil]
+        [nil 'ret [x] []]
           [[['ret x]]
            (array/slice insns 0 -2)]
         # else
@@ -98,7 +98,7 @@
               (assert (not (inline? (cfg bb-next))))
               [(inline-or-jmp bb-next) insns] )))
     (def bb-body [
-      ;(seq [[r phi] :pairs (bb :phi-regs)] (insn/new phi 'phi [] r))
+      ;(seq [[r phi] :pairs (bb :phi-regs)] (insn/new phi 'phi [] [r]))
       ;bb-body
       ;(or (bb :upsilon-insns) [])
     ])

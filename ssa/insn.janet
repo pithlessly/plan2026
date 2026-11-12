@@ -18,7 +18,8 @@
   (assert (or (nil? out) (symbol? out)))
   (assert (symbol? opcode))
   (assert (all ssa/value? inputs))
-  (assert (or (nil? immediates) (int? immediates)))
+  (def immediates (or immediates []))
+  (assert (and (tuple? immediates) (all int? immediates)) immediates)
   (struct/with-proto Insn
     :out out
     :opcode opcode
